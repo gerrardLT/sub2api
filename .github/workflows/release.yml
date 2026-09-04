@@ -331,6 +331,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+      DEPLOY_GHCR_TOKEN: ${{ secrets.DEPLOY_GHCR_TOKEN }}
     steps:
       - name: Resolve target image
         id: image
@@ -345,6 +346,27 @@ jobs:
           IMAGE="ghcr.io/${OWNER_LOWER}/sub2api:${VERSION}"
           echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
           echo "Target image: ${IMAGE}"
+
+      # GHCR packages are private on first push. When no DEPLOY_GHCR_TOKEN is set,
+      # flip the package to public so the server can pull it without auth. Uses the
+      # workflow GITHUB_TOKEN (packages: write). Best-effort: if the API rejects it,
+      # fall back to DEPLOY_GHCR_TOKEN or making the package public manually.
+      - name: Ensure GHCR package is public (when no deploy token)
+        if: ${{ env.DEPLOY_SSH_HOST != '' && env.DEPLOY_GHCR_TOKEN == '' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OWNER_LOWER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "Ensuring ghcr.io/${OWNER_LOWER}/sub2api visibility=public ..."
+          curl -sfL -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/users/${OWNER_LOWER}/packages/container/sub2api" \
+            -d '{"visibility":"public"}' \
+            && echo "OK: package is public." \
+            || echo "WARN: API visibility change failed; set DEPLOY_GHCR_TOKEN or make the package public manually, then re-run this job."
 
       - name: Deploy over SSH
         if: ${{ env.DEPLOY_SSH_HOST != '' }}
