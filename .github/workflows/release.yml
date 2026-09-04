@@ -304,3 +304,79 @@ jobs:
           git add backend/cmd/server/VERSION
           git commit -m "chore: sync VERSION to ${VERSION} [skip ci]"
           git push origin HEAD:${{ github.event.repository.default_branch }}
+
+  # ===========================================================================
+  # Self-host deploy: SSH into your own server and roll out the new GHCR image
+  # ---------------------------------------------------------------------------
+  # Runs only after `release` succeeds AND the DEPLOY_SSH_* secrets are set.
+  # Without those secrets the job is a no-op, so forks without a server are safe.
+  #
+  # Required repository Secrets:
+  #   DEPLOY_SSH_HOST    server host or IP
+  #   DEPLOY_SSH_USER    SSH username
+  #   DEPLOY_SSH_KEY     SSH private key (PEM); put the public key on the server
+  # Optional:
+  #   DEPLOY_SSH_PORT    SSH port (default 22)
+  #   DEPLOY_PATH        compose directory on the server (default /opt/sub2api)
+  #   DEPLOY_GHCR_TOKEN  GHCR PAT with read:packages (only if the package is private)
+  #
+  # Server prerequisite: DEPLOY_PATH holds docker-compose.yml + .env from deploy/.
+  # In that .env set SUB2API_IMAGE=ghcr.io/<your-username>/sub2api:latest.
+  # NOTE: the default (multi-arch) release works on amd64 and arm64 servers; the
+  # SIMPLE_RELEASE mode builds amd64 only.
+  # ===========================================================================
+  deploy:
+    needs: [release]
+    if: ${{ needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+    steps:
+      - name: Resolve target image
+        id: image
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          VERSION="${TAG#v}"
+          OWNER_LOWER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          IMAGE="ghcr.io/${OWNER_LOWER}/sub2api:${VERSION}"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "Target image: ${IMAGE}"
+
+      - name: Deploy over SSH
+        if: ${{ env.DEPLOY_SSH_HOST != '' }}
+        uses: appleboy/ssh-action@v1
+        env:
+          SUB2API_IMAGE: ${{ steps.image.outputs.image }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_GHCR_TOKEN: ${{ secrets.DEPLOY_GHCR_TOKEN }}
+          GHCR_USER: ${{ github.repository_owner }}
+        with:
+          host: ${{ secrets.DEPLOY_SSH_HOST }}
+          port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
+          username: ${{ secrets.DEPLOY_SSH_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: SUB2API_IMAGE,DEPLOY_PATH,DEPLOY_GHCR_TOKEN,GHCR_USER
+          script_stop: true
+          script: |
+            set -eu
+            DEPLOY_PATH="${DEPLOY_PATH:-/opt/sub2api}"
+            cd "$DEPLOY_PATH"
+            if [ -n "${DEPLOY_GHCR_TOKEN:-}" ]; then
+              echo "$DEPLOY_GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            fi
+            # Exported var overrides .env, pinning this exact release version
+            export SUB2API_IMAGE
+            echo "Deploying ${SUB2API_IMAGE} from ${DEPLOY_PATH}"
+            docker compose pull sub2api
+            docker compose up -d sub2api
+            docker image prune -f
+
+      - name: Deploy skipped (no SSH secrets)
+        if: ${{ env.DEPLOY_SSH_HOST == '' }}
+        run: |
+          echo "DEPLOY_SSH_HOST is not set - skipping self-host deploy."
+          echo "Add the DEPLOY_SSH_* secrets to enable automatic deployment."

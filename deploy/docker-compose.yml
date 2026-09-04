@@ -16,7 +16,11 @@ services:
   # Sub2API Application
   # ===========================================================================
   sub2api:
-    image: weishaw/sub2api:latest
+    # Override via SUB2API_IMAGE in .env to deploy your own image, e.g. the GHCR
+    # image the Release workflow builds for your fork:
+    #   ghcr.io/<your-github-username>/sub2api:latest
+    # Falls back to the upstream image when SUB2API_IMAGE is unset.
+    image: ${SUB2API_IMAGE:-weishaw/sub2api:latest}
     container_name: sub2api
     restart: unless-stopped
     security_opt:
